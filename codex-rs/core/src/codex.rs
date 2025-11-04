@@ -1843,20 +1843,64 @@ async fn run_turn(
     let full_instructions_str = full_instructions.to_string();
     let formatted_input = prompt.get_formatted_input();
     let tool_names: Vec<String> = prompt.tools.iter().map(|t| t.name().to_string()).collect();
-    // Log the full prompt content in a readable format
-    let formatted_input_json_pretty = serde_json::to_string_pretty(&formatted_input)
-        .unwrap_or_else(|_| "Failed to serialize input".to_string());
+    // Create a sanitized version of input items for logging (replace verbose user_instructions/environment_context with summaries)
+    let sanitized_input: Vec<serde_json::Value> = formatted_input
+        .iter()
+        .map(|item| {
+            let item_json = serde_json::to_value(item).unwrap_or_default();
+            if let serde_json::Value::Object(mut map) = item_json {
+                if let Some(serde_json::Value::Array(content)) = map.get("content") {
+                    let mut sanitized_content = Vec::new();
+                    let mut has_verbose = false;
+                    
+                    for content_item in content {
+                        if let serde_json::Value::Object(content_map) = content_item {
+                            if let Some(serde_json::Value::String(text)) = content_map.get("text") {
+                                let text_len = text.len();
+                                if text.contains("<user_instructions>") {
+                                    has_verbose = true;
+                                    sanitized_content.push(serde_json::json!({
+                                        "text": format!("<user_instructions>... ({text_len} chars, content omitted for brevity)")
+                                    }));
+                                } else if text.contains("<environment_context>") {
+                                    has_verbose = true;
+                                    sanitized_content.push(serde_json::json!({
+                                        "text": format!("<environment_context>... ({text_len} chars, content omitted for brevity)")
+                                    }));
+                                } else {
+                                    sanitized_content.push(content_item.clone());
+                                }
+                            } else {
+                                sanitized_content.push(content_item.clone());
+                            }
+                        } else {
+                            sanitized_content.push(content_item.clone());
+                        }
+                    }
+                    
+                    if has_verbose {
+                        map.insert("content".to_string(), serde_json::Value::Array(sanitized_content));
+                    }
+                }
+                serde_json::Value::Object(map)
+            } else {
+                item_json
+            }
+        })
+        .collect();
     
+    let formatted_input_json_pretty = serde_json::to_string_pretty(&sanitized_input)
+        .unwrap_or_else(|_| "Failed to serialize input".to_string());
+
     tracing::info!(
         turn_id = %turn_context.sub_id,
         model = %turn_context.client.get_model(),
-        "\n╔════════════════════════════════════════════════════════════════════════════════\n║ PROMPT TO MODEL (turn_id={}, model={})\n╠════════════════════════════════════════════════════════════════════════════════\n║ Instructions length: {} chars\n║ Input items: {}\n║ Tools count: {}\n╠════════════════════════════════════════════════════════════════════════════════\n║ INSTRUCTIONS:\n╠════════════════════════════════════════════════════════════════════════════════\n{}\n╠════════════════════════════════════════════════════════════════════════════════\n║ TOOLS: {}\n╠════════════════════════════════════════════════════════════════════════════════\n║ INPUT ITEMS:\n╠════════════════════════════════════════════════════════════════════════════════\n{}\n╚════════════════════════════════════════════════════════════════════════════════",
+        "\n╔════════════════════════════════════════════════════════════════════════════════\n║ PROMPT TO MODEL (turn_id={}, model={})\n╠════════════════════════════════════════════════════════════════════════════════\n║ Instructions length: {} chars (full instructions can be seen in debug level)\n║ Input items: {}\n║ Tools count: {}\n║ Tools: {}\n╠════════════════════════════════════════════════════════════════════════════════\n║ INPUT ITEMS (user_instructions and environment_context shown as summaries):\n╠════════════════════════════════════════════════════════════════════════════════\n{}\n╚════════════════════════════════════════════════════════════════════════════════",
         turn_context.sub_id,
         turn_context.client.get_model(),
         full_instructions_str.len(),
         formatted_input.len(),
         prompt.tools.len(),
-        full_instructions_str,
         tool_names.join(", "),
         formatted_input_json_pretty
     );
@@ -1899,10 +1943,10 @@ async fn run_turn(
                         )
                     })
                     .collect();
-                
+
                 let response_json_pretty = serde_json::to_string_pretty(&response_items_json)
                     .unwrap_or_else(|_| "Failed to serialize response".to_string());
-                
+
                 tracing::info!(
                     turn_id = %turn_context.sub_id,
                     "\n╔════════════════════════════════════════════════════════════════════════════════\n║ RESPONSE FROM MODEL (turn_id={})\n╠════════════════════════════════════════════════════════════════════════════════\n║ Response items: {}\n║ Items count: {}\n╠════════════════════════════════════════════════════════════════════════════════\n║ FULL RESPONSE:\n╠════════════════════════════════════════════════════════════════════════════════\n{}\n╚════════════════════════════════════════════════════════════════════════════════",
@@ -1915,7 +1959,10 @@ async fn run_turn(
                 // record the reasoning content
                 for item in &output.processed_items {
                     if let ResponseItem::Reasoning {
-                        content, summary, ..
+                        content,
+                        summary,
+                        encrypted_content,
+                        ..
                     } = &item.item
                     {
                         let reasoning_text: String = content
@@ -1936,7 +1983,15 @@ async fn run_turn(
                             .collect::<Vec<_>>()
                             .join(" ");
 
-                        if !reasoning_text.is_empty() {
+                        // Handle encrypted content case (Responses API with reasoning.encrypted_content)
+                        if reasoning_text.is_empty() && encrypted_content.is_some() {
+                            tracing::warn!(
+                                turn_id = %turn_context.sub_id,
+                                summary = %summary_text,
+                                encrypted_content_len = encrypted_content.as_ref().unwrap().len(),
+                                "🧠 REASONING CONTENT ENCRYPTED: content field is null, reasoning is stored as encrypted_content. Decryption requires additional backend API call (not implemented in current codebase). Summary available."
+                            );
+                        } else if !reasoning_text.is_empty() {
                             tracing::info!(
                                 turn_id = %turn_context.sub_id,
                                 reasoning_len = reasoning_text.len(),
@@ -2079,7 +2134,10 @@ async fn try_run_turn(
             ResponseEvent::OutputItemDone(item) => {
                 // Log when we receive a Reasoning item from the stream
                 if let ResponseItem::Reasoning {
-                    content, summary, ..
+                    content,
+                    summary,
+                    encrypted_content,
+                    ..
                 } = &item
                 {
                     let reasoning_text: String = content
@@ -2100,19 +2158,29 @@ async fn try_run_turn(
                         .collect::<Vec<_>>()
                         .join(" ");
 
-                    tracing::info!(
-                        turn_id = %turn_context.sub_id,
-                        reasoning_len = reasoning_text.len(),
-                        summary = %summary_text,
-                        "🧠 REASONING ITEM RECEIVED"
-                    );
-
-                    if !reasoning_text.is_empty() {
-                        tracing::debug!(
+                    // Handle encrypted content case (Responses API with reasoning.encrypted_content)
+                    if reasoning_text.is_empty() && encrypted_content.is_some() {
+                        tracing::warn!(
                             turn_id = %turn_context.sub_id,
-                            reasoning_preview = %reasoning_text.chars().take(200).collect::<String>(),
-                            "🧠 REASONING PREVIEW"
+                            summary = %summary_text,
+                            encrypted_content_len = encrypted_content.as_ref().unwrap().len(),
+                            "🧠 REASONING ITEM RECEIVED (ENCRYPTED): content is null, reasoning stored as encrypted_content. Decryption requires backend API call."
                         );
+                    } else {
+                        tracing::info!(
+                            turn_id = %turn_context.sub_id,
+                            reasoning_len = reasoning_text.len(),
+                            summary = %summary_text,
+                            "🧠 REASONING ITEM RECEIVED"
+                        );
+
+                        if !reasoning_text.is_empty() {
+                            tracing::debug!(
+                                turn_id = %turn_context.sub_id,
+                                reasoning_preview = %reasoning_text.chars().take(200).collect::<String>(),
+                                "🧠 REASONING PREVIEW"
+                            );
+                        }
                     }
                 }
 
