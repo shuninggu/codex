@@ -1843,34 +1843,22 @@ async fn run_turn(
     let full_instructions_str = full_instructions.to_string();
     let formatted_input = prompt.get_formatted_input();
     let tool_names: Vec<String> = prompt.tools.iter().map(|t| t.name().to_string()).collect();
+    // Log the full prompt content in a readable format
+    let formatted_input_json_pretty = serde_json::to_string_pretty(&formatted_input)
+        .unwrap_or_else(|_| "Failed to serialize input".to_string());
+    
     tracing::info!(
         turn_id = %turn_context.sub_id,
         model = %turn_context.client.get_model(),
-        instructions_len = full_instructions_str.len(),
-        input_items = formatted_input.len(),
-        tools_count = prompt.tools.len(),
-        "📤 PROMPT TO MODEL"
-    );
-    // Record a summary of prompt content at info level for easier visibility
-    let prompt_summary = format!(
-        "Instructions: {} chars, Input items: {}, Tools: {}",
+        "\n╔════════════════════════════════════════════════════════════════════════════════\n║ PROMPT TO MODEL (turn_id={}, model={})\n╠════════════════════════════════════════════════════════════════════════════════\n║ Instructions length: {} chars\n║ Input items: {}\n║ Tools count: {}\n╠════════════════════════════════════════════════════════════════════════════════\n║ INSTRUCTIONS:\n╠════════════════════════════════════════════════════════════════════════════════\n{}\n╠════════════════════════════════════════════════════════════════════════════════\n║ TOOLS: {}\n╠════════════════════════════════════════════════════════════════════════════════\n║ INPUT ITEMS:\n╠════════════════════════════════════════════════════════════════════════════════\n{}\n╚════════════════════════════════════════════════════════════════════════════════",
+        turn_context.sub_id,
+        turn_context.client.get_model(),
         full_instructions_str.len(),
         formatted_input.len(),
         prompt.tools.len(),
-    );
-    tracing::info!(
-        turn_id = %turn_context.sub_id,
-        prompt_summary = %prompt_summary,
-        "📤 PROMPT SUMMARY"
-    );
-    // only record the complete content at debug/trace level
-    let formatted_input_json = serde_json::to_value(&formatted_input).unwrap_or_default();
-    tracing::debug!(
-        turn_id = %turn_context.sub_id,
-        instructions = %full_instructions_str,
-        input = ?formatted_input_json,
-        tools = ?tool_names,
-        "📤 PROMPT DETAILS"
+        full_instructions_str,
+        tool_names.join(", "),
+        formatted_input_json_pretty
     );
 
     let mut retries = 0;
@@ -1901,15 +1889,7 @@ async fn run_turn(
                     })
                     .collect();
 
-                tracing::info!(
-                    turn_id = %turn_context.sub_id,
-                    response_items = ?response_items,
-                    items_count = output.processed_items.len(),
-                    "📥 RESPONSE FROM MODEL"
-                );
-
-                // record the detailed response content at debug level
-                // Only serialize the ResponseItem part, not the whole ProcessedResponseItem
+                // Log the full response content in a readable format
                 let response_items_json: Vec<serde_json::Value> = output
                     .processed_items
                     .iter()
@@ -1919,10 +1899,17 @@ async fn run_turn(
                         )
                     })
                     .collect();
-                tracing::debug!(
+                
+                let response_json_pretty = serde_json::to_string_pretty(&response_items_json)
+                    .unwrap_or_else(|_| "Failed to serialize response".to_string());
+                
+                tracing::info!(
                     turn_id = %turn_context.sub_id,
-                    response_items = ?response_items_json,
-                    "📥 RESPONSE DETAILS"
+                    "\n╔════════════════════════════════════════════════════════════════════════════════\n║ RESPONSE FROM MODEL (turn_id={})\n╠════════════════════════════════════════════════════════════════════════════════\n║ Response items: {}\n║ Items count: {}\n╠════════════════════════════════════════════════════════════════════════════════\n║ FULL RESPONSE:\n╠════════════════════════════════════════════════════════════════════════════════\n{}\n╚════════════════════════════════════════════════════════════════════════════════",
+                    turn_context.sub_id,
+                    response_items.join(", "),
+                    output.processed_items.len(),
+                    response_json_pretty
                 );
 
                 // record the reasoning content
