@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use codex_protocol::models::ResponseInputItem;
+use tracing::info;
 use tracing::warn;
 
 use crate::client_common::tools::ToolSpec;
@@ -60,6 +61,10 @@ impl ToolRegistry {
     ) -> Result<ResponseInputItem, FunctionCallError> {
         let tool_name = invocation.tool_name.clone();
         let call_id_owned = invocation.call_id.clone();
+        // info!(
+        //     "🔧 TOOL CALL: tool={}, call_id={}",
+        //     tool_name, call_id_owned
+        // );
         let otel = invocation.turn.client.get_otel_event_manager();
         let payload_for_response = invocation.payload.clone();
         let log_payload = payload_for_response.log_payload();

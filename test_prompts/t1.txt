@@ -1,0 +1,3 @@
+Codex is an AI coding assistant created by OpenAI that turns natural language directions into working code.
+It understands dozens of programming languages, explains existing code, and accelerates everyday developer tasks.
+By bridging human intent and software execution, Codex helps teams prototype faster and ship more reliable solutions.

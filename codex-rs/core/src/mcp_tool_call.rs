@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use tracing::error;
+use tracing::info;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
@@ -21,6 +22,10 @@ pub(crate) async fn handle_mcp_tool_call(
     tool_name: String,
     arguments: String,
 ) -> ResponseInputItem {
+    info!(
+        "🎯 MCP CALL: server={}, tool={}, call_id={}",
+        server, tool_name, call_id
+    );
     // Parse the `arguments` as JSON. An empty string is OK, but invalid JSON
     // is not.
     let arguments_value = if arguments.trim().is_empty() {

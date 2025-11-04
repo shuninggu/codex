@@ -1817,6 +1817,7 @@ async fn run_turn(
     task_kind: TaskKind,
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
+    tracing::info!("🔄 MODEL CALL: turn_id={}", turn_context.sub_id);
     let mcp_tools = sess.services.mcp_connection_manager.list_all_tools();
     let router = Arc::new(ToolRouter::from_config(
         &turn_context.tools_config,
@@ -1836,6 +1837,42 @@ async fn run_turn(
         output_schema: turn_context.final_output_json_schema.clone(),
     };
 
+    // complete prompt
+    let model_family = turn_context.client.get_model_family();
+    let full_instructions = prompt.get_full_instructions(&model_family);
+    let full_instructions_str = full_instructions.to_string();
+    let formatted_input = prompt.get_formatted_input();
+    let tool_names: Vec<String> = prompt.tools.iter().map(|t| t.name().to_string()).collect();
+    tracing::info!(
+        turn_id = %turn_context.sub_id,
+        model = %turn_context.client.get_model(),
+        instructions_len = full_instructions_str.len(),
+        input_items = formatted_input.len(),
+        tools_count = prompt.tools.len(),
+        "📤 PROMPT TO MODEL"
+    );
+    // Record a summary of prompt content at info level for easier visibility
+    let prompt_summary = format!(
+        "Instructions: {} chars, Input items: {}, Tools: {}",
+        full_instructions_str.len(),
+        formatted_input.len(),
+        prompt.tools.len(),
+    );
+    tracing::info!(
+        turn_id = %turn_context.sub_id,
+        prompt_summary = %prompt_summary,
+        "📤 PROMPT SUMMARY"
+    );
+    // only record the complete content at debug/trace level
+    let formatted_input_json = serde_json::to_value(&formatted_input).unwrap_or_default();
+    tracing::debug!(
+        turn_id = %turn_context.sub_id,
+        instructions = %full_instructions_str,
+        input = ?formatted_input_json,
+        tools = ?tool_names,
+        "📤 PROMPT DETAILS"
+    );
+
     let mut retries = 0;
     loop {
         match try_run_turn(
@@ -1849,7 +1886,87 @@ async fn run_turn(
         )
         .await
         {
-            Ok(output) => return Ok(output),
+            Ok(output) => {
+                // record the response summary
+                let response_items: Vec<String> = output
+                    .processed_items
+                    .iter()
+                    .map(|item| match &item.item {
+                        ResponseItem::Message { role, .. } => format!("Message({})", role),
+                        ResponseItem::FunctionCall { name, .. } => {
+                            format!("FunctionCall({})", name)
+                        }
+                        ResponseItem::Reasoning { .. } => "Reasoning".to_string(),
+                        _ => "Other".to_string(),
+                    })
+                    .collect();
+
+                tracing::info!(
+                    turn_id = %turn_context.sub_id,
+                    response_items = ?response_items,
+                    items_count = output.processed_items.len(),
+                    "📥 RESPONSE FROM MODEL"
+                );
+
+                // record the detailed response content at debug level
+                // Only serialize the ResponseItem part, not the whole ProcessedResponseItem
+                let response_items_json: Vec<serde_json::Value> = output
+                    .processed_items
+                    .iter()
+                    .map(|processed_item| {
+                        serde_json::to_value(&processed_item.item).unwrap_or_else(
+                            |_| serde_json::json!({"error": "failed to serialize item"}),
+                        )
+                    })
+                    .collect();
+                tracing::debug!(
+                    turn_id = %turn_context.sub_id,
+                    response_items = ?response_items_json,
+                    "📥 RESPONSE DETAILS"
+                );
+
+                // record the reasoning content
+                for item in &output.processed_items {
+                    if let ResponseItem::Reasoning {
+                        content, summary, ..
+                    } = &item.item
+                    {
+                        let reasoning_text: String = content
+                            .as_ref()
+                            .map(|items| {
+                                items.iter().map(|item| match item {
+                                    codex_protocol::models::ReasoningItemContent::ReasoningText { text }
+                                    | codex_protocol::models::ReasoningItemContent::Text { text } => text.as_str(),
+                                }).collect::<Vec<_>>().join("")
+                            })
+                            .unwrap_or_default();
+
+                        let summary_text: String = summary
+                            .iter()
+                            .map(|item| match item {
+                                codex_protocol::models::ReasoningItemReasoningSummary::SummaryText { text } => text.as_str(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+
+                        if !reasoning_text.is_empty() {
+                            tracing::info!(
+                                turn_id = %turn_context.sub_id,
+                                reasoning_len = reasoning_text.len(),
+                                summary = %summary_text,
+                                "🧠 REASONING CONTENT"
+                            );
+                            tracing::debug!(
+                                turn_id = %turn_context.sub_id,
+                                reasoning = %reasoning_text,
+                                "🧠 REASONING DETAILS"
+                            );
+                        }
+                    }
+                }
+
+                return Ok(output);
+            }
             Err(CodexErr::TurnAborted) => return Err(CodexErr::TurnAborted),
             Err(CodexErr::Interrupted) => return Err(CodexErr::Interrupted),
             Err(CodexErr::EnvVar(var)) => return Err(CodexErr::EnvVar(var)),
@@ -1973,10 +2090,49 @@ async fn try_run_turn(
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
+                // Log when we receive a Reasoning item from the stream
+                if let ResponseItem::Reasoning {
+                    content, summary, ..
+                } = &item
+                {
+                    let reasoning_text: String = content
+                        .as_ref()
+                        .map(|items| {
+                            items.iter().map(|item| match item {
+                                codex_protocol::models::ReasoningItemContent::ReasoningText { text }
+                                | codex_protocol::models::ReasoningItemContent::Text { text } => text.as_str(),
+                            }).collect::<Vec<_>>().join("")
+                        })
+                        .unwrap_or_default();
+
+                    let summary_text: String = summary
+                        .iter()
+                        .map(|item| match item {
+                            codex_protocol::models::ReasoningItemReasoningSummary::SummaryText { text } => text.as_str(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    tracing::info!(
+                        turn_id = %turn_context.sub_id,
+                        reasoning_len = reasoning_text.len(),
+                        summary = %summary_text,
+                        "🧠 REASONING ITEM RECEIVED"
+                    );
+
+                    if !reasoning_text.is_empty() {
+                        tracing::debug!(
+                            turn_id = %turn_context.sub_id,
+                            reasoning_preview = %reasoning_text.chars().take(200).collect::<String>(),
+                            "🧠 REASONING PREVIEW"
+                        );
+                    }
+                }
+
                 match ToolRouter::build_tool_call(sess.as_ref(), item.clone()) {
                     Ok(Some(call)) => {
                         let payload_preview = call.payload.log_payload().into_owned();
-                        tracing::info!("ToolCall: {} {}", call.tool_name, payload_preview);
+                        tracing::info!("🔧 ToolCall: {} {}", call.tool_name, payload_preview);
 
                         let response = tool_runtime.handle_tool_call(call);
 
@@ -2093,6 +2249,11 @@ async fn try_run_turn(
                 }
             }
             ResponseEvent::ReasoningSummaryDelta(delta) => {
+                tracing::debug!(
+                    turn_id = %turn_context.sub_id,
+                    summary_delta = %delta,
+                    "🧠 REASONING SUMMARY DELTA"
+                );
                 let event = EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta });
                 sess.send_event(&turn_context, event).await;
             }
@@ -2102,6 +2263,20 @@ async fn try_run_turn(
                 sess.send_event(&turn_context, event).await;
             }
             ResponseEvent::ReasoningContentDelta(delta) => {
+                // record the streaming reasoning content
+                tracing::info!(
+                    turn_id = %turn_context.sub_id,
+                    delta_len = delta.len(),
+                    delta_preview = %delta.chars().take(100).collect::<String>(),
+                    "🧠 REASONING DELTA"
+                );
+
+                tracing::trace!(
+                    turn_id = %turn_context.sub_id,
+                    delta_full = %delta,
+                    "🧠 REASONING DELTA FULL"
+                );
+
                 if sess.show_raw_agent_reasoning() {
                     let event = EventMsg::AgentReasoningRawContentDelta(
                         AgentReasoningRawContentDeltaEvent { delta },
