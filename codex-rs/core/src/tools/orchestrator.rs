@@ -16,6 +16,9 @@ use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
+use tracing::debug;
+use tracing::info;
+use tracing::warn;
 
 pub(crate) struct ToolOrchestrator {
     sandbox: SandboxManager,
@@ -50,7 +53,21 @@ impl ToolOrchestrator {
             tool.wants_initial_approval(req, approval_policy, &turn_ctx.sandbox_policy);
         let mut already_approved = false;
 
+        info!(
+            "🔐 APPROVAL CHECK: tool={}, call_id={}, turn_id={}, needs_approval={}, approval_policy={:?}, sandbox_policy={:?}",
+            tool_ctx.tool_name,
+            tool_ctx.call_id,
+            turn_ctx.sub_id,
+            needs_initial_approval,
+            approval_policy,
+            turn_ctx.sandbox_policy,
+        );
+
         if needs_initial_approval {
+            info!(
+                "⏸️  REQUESTING USER APPROVAL: tool={}, call_id={}, turn_id={}",
+                tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id,
+            );
             let approval_ctx = ApprovalCtx {
                 session: tool_ctx.session,
                 turn: turn_ctx,
@@ -59,16 +76,34 @@ impl ToolOrchestrator {
             };
             let decision = tool.start_approval_async(req, approval_ctx).await;
 
+            info!(
+                "✅ APPROVAL DECISION: tool={}, call_id={}, turn_id={}, decision={:?}",
+                tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id, decision,
+            );
+
             otel.tool_decision(otel_tn, otel_ci, decision, otel_user.clone());
 
             match decision {
                 ReviewDecision::Denied | ReviewDecision::Abort => {
+                    warn!(
+                        "❌ TOOL CALL DENIED BY USER: tool={}, call_id={}, turn_id={}",
+                        tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id,
+                    );
                     return Err(ToolError::Rejected("rejected by user".to_string()));
                 }
-                ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {}
+                ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
+                    debug!(
+                        "✅ TOOL CALL APPROVED BY USER: tool={}, call_id={}, turn_id={}",
+                        tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id,
+                    );
+                }
             }
             already_approved = true;
         } else {
+            debug!(
+                "✅ TOOL CALL AUTO-APPROVED: tool={}, call_id={}, turn_id={}",
+                tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id,
+            );
             otel.tool_decision(otel_tn, otel_ci, ReviewDecision::Approved, otel_cfg);
         }
 
@@ -108,6 +143,10 @@ impl ToolOrchestrator {
                 // Ask for approval before retrying without sandbox.
                 if !tool.should_bypass_approval(approval_policy, already_approved) {
                     let reason_msg = build_denial_reason_from_output(output.as_ref());
+                    info!(
+                        "⏸️  REQUESTING USER APPROVAL FOR RETRY: tool={}, call_id={}, turn_id={}, reason={}",
+                        tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id, reason_msg,
+                    );
                     let approval_ctx = ApprovalCtx {
                         session: tool_ctx.session,
                         turn: turn_ctx,
@@ -116,14 +155,32 @@ impl ToolOrchestrator {
                     };
 
                     let decision = tool.start_approval_async(req, approval_ctx).await;
+                    info!(
+                        "✅ APPROVAL DECISION FOR RETRY: tool={}, call_id={}, turn_id={}, decision={:?}",
+                        tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id, decision,
+                    );
                     otel.tool_decision(otel_tn, otel_ci, decision, otel_user);
 
                     match decision {
                         ReviewDecision::Denied | ReviewDecision::Abort => {
+                            warn!(
+                                "❌ TOOL CALL RETRY DENIED BY USER: tool={}, call_id={}, turn_id={}",
+                                tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id,
+                            );
                             return Err(ToolError::Rejected("rejected by user".to_string()));
                         }
-                        ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {}
+                        ReviewDecision::Approved | ReviewDecision::ApprovedForSession => {
+                            debug!(
+                                "✅ TOOL CALL RETRY APPROVED BY USER: tool={}, call_id={}, turn_id={}",
+                                tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id,
+                            );
+                        }
                     }
+                } else {
+                    debug!(
+                        "✅ TOOL CALL RETRY AUTO-APPROVED (bypassed): tool={}, call_id={}, turn_id={}",
+                        tool_ctx.tool_name, tool_ctx.call_id, turn_ctx.sub_id,
+                    );
                 }
 
                 let escalated_attempt = SandboxAttempt {

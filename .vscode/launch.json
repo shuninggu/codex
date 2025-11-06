@@ -4,23 +4,11 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Cargo launch (codex CLI)",
+      "name": "Cargo launch",
       "cargo": {
         "cwd": "${workspaceFolder}/codex-rs",
-        "args": ["build", "--bin", "codex"]
+        "args": ["build", "--bin=codex-tui"]
       },
-      "program": "${workspaceFolder}/codex-rs/target/debug/codex",
-      "args": []
-    },
-    {
-      "type": "lldb",
-      "request": "launch",
-      "name": "Cargo launch (codex-tui)",
-      "cargo": {
-        "cwd": "${workspaceFolder}/codex-rs",
-        "args": ["build", "--bin", "codex-tui"]
-      },
-      "program": "${workspaceFolder}/codex-rs/target/debug/codex-tui",
       "args": []
     },
     {

@@ -1538,8 +1538,16 @@ pub(crate) async fn run_task(
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
     let mut auto_compact_recently_attempted = false;
+    let mut turn_iteration = 0u32;
 
     loop {
+        turn_iteration += 1;
+        info!(
+            "🔄 TASK LOOP ITERATION: iteration={}, turn_id={}, task_kind={:?}",
+            turn_iteration,
+            turn_context.sub_id,
+            task_kind,
+        );
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
@@ -1598,6 +1606,30 @@ pub(crate) async fn run_task(
                     processed_items,
                     total_token_usage,
                 } = turn_output;
+                
+                let tool_call_count = processed_items
+                    .iter()
+                    .filter(|item| matches!(
+                        item.item,
+                        ResponseItem::FunctionCall { .. }
+                            | ResponseItem::CustomToolCall { .. }
+                            | ResponseItem::LocalShellCall { .. }
+                    ))
+                    .count();
+                let has_assistant_message = processed_items
+                    .iter()
+                    .any(|item| matches!(
+                        &item.item,
+                        ResponseItem::Message { role, .. } if role == "assistant"
+                    ));
+                
+                info!(
+                    "✅ TURN COMPLETED: iteration={}, turn_id={}, tool_calls={}, has_assistant_message={}",
+                    turn_iteration,
+                    turn_context.sub_id,
+                    tool_call_count,
+                    has_assistant_message,
+                );
                 let limit = turn_context
                     .client
                     .get_auto_compact_token_limit()
@@ -1734,6 +1766,11 @@ pub(crate) async fn run_task(
                 auto_compact_recently_attempted = false;
 
                 if responses.is_empty() {
+                    info!(
+                        "🏁 TASK COMPLETE: iteration={}, turn_id={}, no tool outputs to process, exiting loop",
+                        turn_iteration,
+                        turn_context.sub_id,
+                    );
                     last_agent_message = get_last_assistant_message_from_turn(
                         &items_to_record_in_conversation_history,
                     );
@@ -1747,6 +1784,12 @@ pub(crate) async fn run_task(
                         });
                     break;
                 }
+                info!(
+                    "🔄 CONTINUING LOOP: iteration={}, turn_id={}, tool_outputs={}, will call model again",
+                    turn_iteration,
+                    turn_context.sub_id,
+                    responses.len(),
+                );
                 continue;
             }
             Err(CodexErr::TurnAborted) => {
@@ -2130,8 +2173,28 @@ async fn try_run_turn(
         };
 
         match event {
-            ResponseEvent::Created => {}
+            ResponseEvent::Created => {
+                info!(
+                    "📡 STREAM EVENT: Created (response stream started), turn_id={}",
+                    turn_context.sub_id,
+                );
+            }
             ResponseEvent::OutputItemDone(item) => {
+                info!(
+                    "📡 STREAM EVENT: OutputItemDone, turn_id={}, item_type={}",
+                    turn_context.sub_id,
+                    match &item {
+                        ResponseItem::Reasoning { .. } => "Reasoning",
+                        ResponseItem::FunctionCall { .. } => "FunctionCall",
+                        ResponseItem::CustomToolCall { .. } => "CustomToolCall",
+                        ResponseItem::Message { .. } => "Message",
+                        ResponseItem::FunctionCallOutput { .. } => "FunctionCallOutput",
+                        ResponseItem::CustomToolCallOutput { .. } => "CustomToolCallOutput",
+                        ResponseItem::LocalShellCall { .. } => "LocalShellCall",
+                        ResponseItem::WebSearchCall { .. } => "WebSearchCall",
+                        ResponseItem::Other => "Other",
+                    },
+                );
                 // Log when we receive a Reasoning item from the stream
                 if let ResponseItem::Reasoning {
                     content,
@@ -2187,7 +2250,18 @@ async fn try_run_turn(
                 match ToolRouter::build_tool_call(sess.as_ref(), item.clone()) {
                     Ok(Some(call)) => {
                         let payload_preview = call.payload.log_payload().into_owned();
-                        tracing::info!("🔧 ToolCall: {} {}", call.tool_name, payload_preview);
+                        info!(
+                            "🔧 TOOL CALL EXTRACTED: tool={}, call_id={}, turn_id={}, payload={}",
+                            call.tool_name,
+                            call.call_id,
+                            turn_context.sub_id,
+                            payload_preview,
+                        );
+                        info!(
+                            "🔧 ToolCall: {} {}",
+                            call.tool_name,
+                            payload_preview
+                        );
 
                         let response = tool_runtime.handle_tool_call(call);
 
@@ -2269,6 +2343,10 @@ async fn try_run_turn(
                 response_id: _,
                 token_usage,
             } => {
+                info!(
+                    "📡 STREAM EVENT: Completed (response stream finished), turn_id={}",
+                    turn_context.sub_id,
+                );
                 sess.update_token_usage_info(turn_context.as_ref(), token_usage.as_ref())
                     .await;
 
