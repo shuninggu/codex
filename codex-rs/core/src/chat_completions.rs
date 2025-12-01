@@ -279,6 +279,27 @@ pub(crate) async fn stream_chat_completions(
     }
 
     let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
+    let tools_count = tools_json.len();
+
+    // Determine if this is a tool-call turn (second interaction) or initial turn
+    let has_tool_calls_in_history = messages.iter().any(|msg| {
+        msg.get("tool_calls").is_some() || msg.get("role").and_then(|r| r.as_str()) == Some("tool")
+    });
+    let interaction_type = if has_tool_calls_in_history {
+        "tool_result_followup"
+    } else {
+        "initial"
+    };
+
+    // Log detailed prompt information before creating payload
+    tracing::info!(
+        "LLM Prompt [{}] - messages_count={}, tools_count={}, model={}",
+        interaction_type,
+        messages.len(),
+        tools_count,
+        model_family.slug
+    );
+
     let payload = json!({
         "model": model_family.slug,
         "messages": messages,
@@ -287,7 +308,8 @@ pub(crate) async fn stream_chat_completions(
     });
 
     debug!(
-        "POST to {}: {}",
+        "LLM Request [{}] - POST to {}: {}",
+        interaction_type,
         provider.get_full_url(&None),
         serde_json::to_string_pretty(&payload).unwrap_or_default()
     );
@@ -596,12 +618,24 @@ async fn process_chat_sse<S>(
                             let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
                         }
 
+                        // Log tool call response before creating item
+                        let tool_name =
+                            fn_call_state.name.clone().unwrap_or_else(|| "".to_string());
+                        let call_id = fn_call_state.call_id.clone().unwrap_or_else(String::new);
+                        let arguments = fn_call_state.arguments.clone();
+                        tracing::info!(
+                            "LLM Response [tool_call] - tool={}, call_id={}, arguments={}",
+                            tool_name,
+                            call_id,
+                            arguments
+                        );
+
                         // Then emit the FunctionCall response item.
                         let item = ResponseItem::FunctionCall {
                             id: None,
-                            name: fn_call_state.name.clone().unwrap_or_else(|| "".to_string()),
-                            arguments: fn_call_state.arguments.clone(),
-                            call_id: fn_call_state.call_id.clone().unwrap_or_else(String::new),
+                            name: tool_name,
+                            arguments,
+                            call_id,
                         };
 
                         let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
@@ -610,6 +644,19 @@ async fn process_chat_sse<S>(
                         // Regular turn without tool-call. Emit the final assistant message
                         // as a single OutputItemDone so non-delta consumers see the result.
                         if !assistant_text.is_empty() {
+                            let message_text = assistant_text.clone();
+
+                            // Log final assistant message response
+                            tracing::info!(
+                                "LLM Response [final_message] - length={} chars, preview={}",
+                                message_text.len(),
+                                if message_text.len() > 200 {
+                                    format!("{}...", &message_text[..200])
+                                } else {
+                                    message_text.clone()
+                                }
+                            );
+
                             let item = ResponseItem::Message {
                                 role: "assistant".to_string(),
                                 content: vec![ContentItem::OutputText {
@@ -617,6 +664,7 @@ async fn process_chat_sse<S>(
                                 }],
                                 id: None,
                             };
+
                             let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
                         }
                         // Also emit a terminal Reasoning item so UIs can finalize raw reasoning.

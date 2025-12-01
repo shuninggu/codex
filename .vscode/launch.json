@@ -5,11 +5,13 @@
       "type": "lldb",
       "request": "launch",
       "name": "Cargo launch",
-      "cargo": {
-        "cwd": "${workspaceFolder}/codex-rs",
-        "args": ["build", "--bin=codex-tui"]
-      },
-      "args": []
+      "program": "${workspaceFolder}/codex-rs/target/debug/codex-tui",
+      "args": [],
+      "cwd": "${workspaceFolder}/codex-rs",
+      "preLaunchTask": "cargo: build codex-tui",
+      "env": {
+        "CODEX_GITHUB_PAT": "${env:CODEX_GITHUB_PAT}"
+      }
     },
     {
       "type": "lldb",

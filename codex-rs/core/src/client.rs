@@ -775,6 +775,16 @@ async fn process_sse<S>(
             // drop the duplicated list inside `response.completed`.
             "response.output_item.done" => {
                 let Some(item_val) = event.item else { continue };
+                // Log web_search_call items before parsing
+                if let Some(ty) = item_val.get("type").and_then(|v| v.as_str())
+                    && ty == "web_search_call"
+                    && let Ok(item_json) = serde_json::to_string_pretty(&item_val)
+                {
+                    tracing::info!(
+                        "WebSearchCall item received (response.output_item.done):\n{}",
+                        item_json
+                    );
+                }
                 let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) else {
                     debug!("failed to parse ResponseItem from output_item.done");
                     continue;
@@ -876,6 +886,13 @@ async fn process_sse<S>(
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        // Log the full web_search_call item for debugging
+                        if let Ok(item_json) = serde_json::to_string_pretty(item) {
+                            tracing::info!(
+                                "WebSearchCall item received (response.output_item.added):\n{}",
+                                item_json
+                            );
+                        }
                         let ev = ResponseEvent::WebSearchCallBegin { call_id };
                         if tx_event.send(Ok(ev)).await.is_err() {
                             return;

@@ -2125,6 +2125,13 @@ async fn handle_non_tool_response_item(
         ResponseItem::Message { .. }
         | ResponseItem::Reasoning { .. }
         | ResponseItem::WebSearchCall { .. } => {
+            if let ResponseItem::WebSearchCall { id, action, status } = &item {
+                let action_json =
+                    serde_json::to_string(action).unwrap_or_else(|_| format!("{action:?}"));
+                tracing::info!(
+                    "WebSearchCall received: id={id:?}, status={status:?}, action={action_json}"
+                );
+            }
             let turn_item = match &item {
                 ResponseItem::Message { .. } if turn_context.is_review_mode => {
                     trace!("suppressing assistant Message in review mode");
