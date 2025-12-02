@@ -1,4 +1,6 @@
+use std::fs::OpenOptions;
 use std::io::BufRead;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -302,6 +304,9 @@ impl ModelClient {
             serde_json::to_string(payload_json)
         );
 
+        // Log raw LLM request payload
+        log_llm_interaction("request", payload_json);
+
         let mut req_builder = self
             .provider
             .create_request_builder(&self.client, &auth)
@@ -528,6 +533,32 @@ impl StreamAttemptError {
     }
 }
 
+/// Log LLM interaction (request or response) to a JSONL file.
+/// Controlled by CODEX_LLM_LOG_PATH environment variable.
+/// If not set, logging is disabled.
+fn log_llm_interaction(direction: &str, payload: &Value) {
+    let log_path = match std::env::var("CODEX_LLM_LOG_PATH") {
+        Ok(path) => path,
+        Err(_) => return, // Logging disabled if env var not set
+    };
+
+    let log_entry = serde_json::json!({
+        "ts": Utc::now().to_rfc3339(),
+        "direction": direction,
+        "payload": payload,
+    });
+
+    if let Ok(serialized) = serde_json::to_string(&log_entry) {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = writeln!(file, "{serialized}");
+            let _ = file.flush();
+        } else {
+            // Silently fail - don't spam logs if file can't be opened
+            trace!("Failed to open LLM log file: {}", log_path);
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct SseEvent {
     #[serde(rename = "type")]
@@ -745,6 +776,11 @@ async fn process_sse<S>(
 
         let raw = sse.data.clone();
         trace!("SSE event: {}", raw);
+
+        // Log raw SSE response chunk before parsing
+        if let Ok(chunk_json) = serde_json::from_str::<Value>(&sse.data) {
+            log_llm_interaction("response_chunk", &chunk_json);
+        }
 
         let event: SseEvent = match serde_json::from_str(&sse.data) {
             Ok(event) => event,

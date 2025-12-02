@@ -1,3 +1,5 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::time::Duration;
 
 use crate::ModelProviderInfo;
@@ -14,6 +16,7 @@ use crate::model_family::ModelFamily;
 use crate::tools::spec::create_tools_json_for_chat_completions_api;
 use crate::util::backoff;
 use bytes::Bytes;
+use chrono::Utc;
 use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
@@ -23,6 +26,7 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use reqwest::StatusCode;
+use serde_json::Value;
 use serde_json::json;
 use std::pin::Pin;
 use std::task::Context;
@@ -31,6 +35,32 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::debug;
 use tracing::trace;
+
+/// Log LLM interaction (request or response) to a JSONL file.
+/// Controlled by CODEX_LLM_LOG_PATH environment variable.
+/// If not set, logging is disabled.
+fn log_llm_interaction(direction: &str, payload: &Value) {
+    let log_path = match std::env::var("CODEX_LLM_LOG_PATH") {
+        Ok(path) => path,
+        Err(_) => return, // Logging disabled if env var not set
+    };
+
+    let log_entry = serde_json::json!({
+        "ts": Utc::now().to_rfc3339(),
+        "direction": direction,
+        "payload": payload,
+    });
+
+    if let Ok(serialized) = serde_json::to_string(&log_entry) {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = writeln!(file, "{serialized}");
+            let _ = file.flush();
+        } else {
+            // Silently fail - don't spam logs if file can't be opened
+            trace!("Failed to open LLM log file: {}", log_path);
+        }
+    }
+}
 
 /// Implementation for the classic Chat Completions API.
 pub(crate) async fn stream_chat_completions(
@@ -314,6 +344,9 @@ pub(crate) async fn stream_chat_completions(
         serde_json::to_string_pretty(&payload).unwrap_or_default()
     );
 
+    // Log raw LLM request payload
+    log_llm_interaction("request", &payload);
+
     let mut attempt = 0;
     let max_retries = provider.request_max_retries();
     loop {
@@ -496,6 +529,9 @@ async fn process_chat_sse<S>(
             Err(_) => continue,
         };
         trace!("chat_completions received SSE chunk: {chunk:?}");
+
+        // Log raw SSE response chunk before processing
+        log_llm_interaction("response_chunk", &chunk);
 
         let choice_opt = chunk.get("choices").and_then(|c| c.get(0));
 
